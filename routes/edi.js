@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
 import { isFullyReady } from '../src/rules/ruleLogic.js';
-import { buildISA, buildGS, buildST, buildBHT } from '../src/edi/envelope.js';
+import { buildISA, buildGS, buildST, buildBHT, buildBillingProviderHL, buildSubscriberHL } from '../src/edi/envelope.js';
 import { getNextControlNumber } from '../src/edi/controlNumber.js';
 import { buildBillingProviderLoop } from '../src/edi/billingProvider.js';
 import { buildSubscriberLoop } from '../src/edi/subscriber.js';
@@ -86,19 +86,31 @@ router.post('/generate', async (req, res) => {
 
     const isaSegment = buildISA(controlNumber, 'SUBMITTERID', 'AVAILITYRECV');
     const gsSegment = buildGS(controlNumber, 'SUBMITTERID', 'AVAILITYRECV');
-    const billingProviderLoop = buildBillingProviderLoop(eligibleClaims[0].provider);
 
-    const perClaimBlocks = eligibleClaims.map(claim => [
-      buildSubscriberLoop(claim.patient),
-      buildPayerLoop(claim.payer),
-      buildClaimSegment(claim),
-      buildServiceLineSegment(claim.service)
-    ].join('\n'));
+    // Loop 2000A: Billing Provider HL, then the billing provider's own segments.
+    const billingProviderBlock = [
+      buildBillingProviderHL(),
+      buildBillingProviderLoop(eligibleClaims[0].provider)
+    ].join('\n');
+
+    // Loop 2000B: one Subscriber HL per claim (hlId starts at 2, since
+    // the billing provider's HL took id 1), followed by that claim's
+    // subscriber/payer/claim/service-line segments.
+    const perClaimBlocks = eligibleClaims.map((claim, index) => {
+      const hlId = index + 2;
+      return [
+        buildSubscriberHL(hlId),
+        buildSubscriberLoop(claim.patient),
+        buildPayerLoop(claim.payer),
+        buildClaimSegment(claim),
+        buildServiceLineSegment(claim.service)
+      ].join('\n');
+    });
 
     const transactionSegments = [
       buildST(controlNumber),
       buildBHT(controlNumber),
-      billingProviderLoop,
+      billingProviderBlock,
       ...perClaimBlocks
     ];
     const transactionContent = transactionSegments.join('\n');
